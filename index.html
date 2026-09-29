@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AtomX — Mine Subsidence Monitoring Prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#141310; --panel:#1c1a15cc; --line:#3a362c; --text:#e9e2ce; --dim:#9a927d;
+    --amber:#e0a458; --moss:#8a9a5b; --rust:#c1543a; --coal:#0d0c0a;
+  }
+  html,body{height:100%;margin:0;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);}
+  body{background:var(--coal);color:var(--text);font-family:'IBM Plex Mono',monospace;overflow:hidden;}
+  #wrap{position:fixed;inset:0;}
+  canvas{display:block;touch-action:none;}
+  .panel{position:absolute;background:var(--panel);border:1px solid var(--line);backdrop-filter:blur(3px);padding:14px 16px;max-width:min(340px,42vw);}
+  #title{top:calc(16px + env(safe-area-inset-top,0px));left:16px;}
+  #title h1{font-family:'Barlow Condensed',sans-serif;font-weight:700;font-size:22px;letter-spacing:.02em;margin:0 0 2px;color:var(--text);}
+  #title p{margin:0;font-size:11px;color:var(--dim);line-height:1.5;}
+  #legend{bottom:calc(16px + env(safe-area-inset-bottom,0px));left:16px;font-size:11px;line-height:1.9;}
+  #legend .row{display:flex;align-items:center;gap:8px;}
+  #legend .sw{width:9px;height:9px;border-radius:1px;flex:none;}
+  #telemetry{top:calc(16px + env(safe-area-inset-top,0px));right:16px;font-size:11px;line-height:1.7;text-align:right;}
+  #telemetry .k{color:var(--dim);margin-right:8px;}
+  #hint{bottom:calc(16px + env(safe-area-inset-bottom,0px));right:16px;font-size:10px;color:var(--dim);text-align:right;letter-spacing:.03em;}
+  #controls{left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom,0px));max-width:94vw;padding:10px 12px;}
+  #controls .grp{display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin:3px 0;}
+  .btn{font-family:'IBM Plex Mono',monospace;font-size:10px;letter-spacing:.02em;color:var(--text);background:#26241d;
+    border:1px solid var(--line);padding:6px 9px;cursor:pointer;}
+  .btn:hover{border-color:var(--amber);color:var(--amber);}
+  @media (max-width:640px){ .panel{max-width:78vw;} #legend{display:none;} #controls{max-width:96vw;} .btn{font-size:9px;padding:5px 7px;} }
+</style>
+</head>
+<body>
+<div id="wrap"></div>
+
+<div class="panel" id="title">
+  <h1>AtomX — Subsidence Sentinel</h1>
+  <p>SIH26025 · AI-enabled real-time mine subsidence monitoring<br>4-node redundant mesh · simulate events with the panel below</p>
+</div>
+
+<div class="panel" id="legend">
+  <div class="row"><span class="sw" style="background:#8a9a5b"></span> Node stable — normal tilt/strain</div>
+  <div class="row"><span class="sw" style="background:#e0a458"></span> Node watch — trend rising</div>
+  <div class="row"><span class="sw" style="background:#c1543a"></span> Node critical — near crack front</div>
+  <div class="row"><span class="sw" style="background:#7a6a4d"></span> LoRa link to gateway</div>
+  <div class="row"><span class="sw" style="background:#6a8aa0"></span> Peer-to-peer mesh (reroutes if a node drops)</div>
+  <div class="row" style="color:var(--dim);margin-top:4px;">On each node: ESP32 · MPU6050 · ADXL345 · DHT22 · potentiometer · Li-ion cell</div>
+</div>
+
+<div class="panel" id="telemetry">
+  <div><span class="k">TILT</span><span id="t-tilt">0.0°</span></div>
+  <div><span class="k">DISPLACEMENT</span><span id="t-disp">0.0mm</span></div>
+  <div><span class="k">VIBRATION</span><span id="t-vib">0.00g</span></div>
+  <div><span class="k">ACTIVE SENSORS</span><span id="t-active">4/4</span></div>
+  <div><span class="k">AI RISK</span><span id="t-risk">WATCH</span></div>
+  <div><span class="k">MESH</span><span id="t-mesh">ALL NODES ONLINE</span></div>
+</div>
+
+<div id="hint">drag to orbit · scroll to zoom</div>
+
+<div class="panel" id="controls">
+  <div class="grp">
+    <button class="btn" data-a="deform">Simulate Deformation</button>
+    <button class="btn" data-a="crack">Simulate Crack</button>
+    <button class="btn" data-a="vib">Simulate Vibration</button>
+    <button class="btn" data-a="fail">Fail Node</button>
+    <button class="btn" data-a="restore">Restore Node</button>
+    <button class="btn" data-a="reset">Reset</button>
+  </div>
+  <div class="grp">
+    <button class="btn" data-v="top">Top View</button>
+    <button class="btn" data-v="side">Side View</button>
+    <button class="btn" data-v="full">Full Model</button>
+    <button class="btn" data-v="underground">Underground View</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+"use strict";
+var scene = new THREE.Scene();
+scene.background = new THREE.Color(0x141310);
+scene.fog = new THREE.FogExp2(0x181510, 0.0105);
+
+var camera = new THREE.PerspectiveCamera(42, innerWidth/innerHeight, 0.1, 800);
+var renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+document.getElementById('wrap').appendChild(renderer.domElement);
+
+// ---- lights: dawn shift over an open mine yard ----
+scene.add(new THREE.AmbientLight(0x6a6250, 0.75));
+var sun = new THREE.DirectionalLight(0xffd9a0, 1.15);
+sun.position.set(60, 70, 30);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048,2048);
+sun.shadow.camera.left=-90; sun.shadow.camera.right=90;
+sun.shadow.camera.top=90; sun.shadow.camera.bottom=-90;
+scene.add(sun);
+var fill = new THREE.DirectionalLight(0x5a6a8a, 0.25);
+fill.position.set(-40,30,-50);
+scene.add(fill);
+
+// ---- terrain: rolling mine land with a subsidence bowl that deepens as mining continues ----
+var SIZE=200, SEG=90;
+var geo = new THREE.PlaneGeometry(SIZE,SIZE,SEG,SEG);
+geo.rotateX(-Math.PI/2);
+var bowlX=0, bowlZ=-6;
+var BOWL_DEPTH=5.0;
+function h(x,z){
+  var v = Math.sin(x*0.045)*2.6 + Math.cos(z*0.05)*2.1
+        + Math.sin(x*0.11+z*0.09)*1.0
+        + Math.sin(x*0.3)*Math.cos(z*0.27)*0.5;
+  var dx=x-bowlX, dz=z-bowlZ, d2=dx*dx+dz*dz;
+  v -= BOWL_DEPTH*Math.exp(-d2/200);
+  return v;
+}
+var pos = geo.attributes.position;
+geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(pos.count*3),3));
+var colorAttr = geo.attributes.color;
+function rebuildTerrain(){
+  for(var i=0;i<pos.count;i++){
+    var x=pos.getX(i), z=pos.getZ(i);
+    var y=h(x,z);
+    pos.setY(i,y);
+    var dx=x-bowlX, dz=z-bowlZ, d2=dx*dx+dz*dz;
+    var risk = Math.exp(-d2/200);
+    var base = new THREE.Color(0x6b5a3f);
+    var dark = new THREE.Color(0x453923);
+    var warn = new THREE.Color(0x7a3624);
+    var c = base.clone().lerp(dark, THREE.MathUtils.clamp((y+7)/-9,0,1));
+    c.lerp(warn, Math.pow(risk,1.4)*0.85);
+    colorAttr.setXYZ(i,c.r,c.g,c.b);
+  }
+  pos.needsUpdate=true; colorAttr.needsUpdate=true;
+  geo.computeVertexNormals();
+  if(typeof gp!=='undefined'){
+    for(var j=0;j<gp.count;j++){ gp.setY(j, h(gp.getX(j),gp.getZ(j))+0.03); }
+    gp.needsUpdate=true;
+  }
+}
+var terrain = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({vertexColors:true, roughness:0.95, metalness:0.02}));
+terrain.receiveShadow = true;
+scene.add(terrain);
+
+// survey grid overlay -- "grid form" tactile site-survey look
+var gridGeo = new THREE.PlaneGeometry(SIZE,SIZE,SEG,SEG);
+gridGeo.rotateX(-Math.PI/2);
+var gp = gridGeo.attributes.position;
+var gridMat = new THREE.MeshBasicMaterial({color:0xd8c9a0, wireframe:true, transparent:true, opacity:0.10});
+scene.add(new THREE.Mesh(gridGeo, gridMat));
+rebuildTerrain();
+
+// mining is what causes the void underfoot to slowly deepen -- this is the cause the sensors are watching for
+setInterval(function(){
+  if(BOWL_DEPTH<9.5){ BOWL_DEPTH+=0.35; rebuildTerrain(); }
+}, 2200);
+
+// ---- underground seam void + crack ----
+var seam = new THREE.Mesh(
+  new THREE.BoxGeometry(34,3,20),
+  new THREE.MeshStandardMaterial({color:0x1c1a16, roughness:1, transparent:true, opacity:0.9})
+);
+seam.position.set(bowlX,-16,bowlZ);
+scene.add(seam);
+var seamEdges = new THREE.LineSegments(new THREE.EdgesGeometry(seam.geometry), new THREE.LineBasicMaterial({color:0x8a6a3a}));
+seamEdges.position.copy(seam.position);
+scene.add(seamEdges);
+
+var crackPts=[];
+for(var t=0;t<=1;t+=0.08){
+  crackPts.push(new THREE.Vector3(
+    bowlX + Math.sin(t*9)*1.6,
+    -15 + t*15 + h(bowlX,bowlZ)*0 ,
+    bowlZ + Math.cos(t*6)*1.2 - 2 + t*2
+  ));
+}
+var crackCurve = new THREE.CatmullRomCurve3(crackPts);
+var crackTube = new THREE.Mesh(
+  new THREE.TubeGeometry(crackCurve, 40, 0.22, 6, false),
+  new THREE.MeshStandardMaterial({color:0x2a1210, roughness:0.6, emissive:0x3a1005, emissiveIntensity:0.4})
+);
+scene.add(crackTube);
+
+// ---- helpers ----
+function makeLabel(text,color){
+  var cv=document.createElement('canvas'); cv.width=256; cv.height=64;
+  var ctx=cv.getContext('2d');
+  ctx.font='600 30px Barlow Condensed, sans-serif';
+  ctx.fillStyle=color||'#e9e2ce';
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(text,128,34);
+  var tex=new THREE.CanvasTexture(cv);
+  var spr=new THREE.Sprite(new THREE.SpriteMaterial({map:tex, transparent:true, depthTest:false}));
+  spr.scale.set(7,1.75,1);
+  return spr;
+}
+
+function addPart(g, geom, color, p, rotZ){
+  var m = new THREE.Mesh(geom, new THREE.MeshStandardMaterial({color:color, roughness:0.55, metalness:0.15}));
+  m.position.set(p[0],p[1],p[2]);
+  if(rotZ) m.rotation.z = rotZ;
+  m.castShadow = true;
+  g.add(m);
+  return m;
+}
+function buildNode(x,z,riskColor,label){
+  var y = h(x,z);
+  var g = new THREE.Group();
+  g.position.set(x,y,z);
+  var pole = new THREE.Mesh(new THREE.CylinderGeometry(0.12,0.16,4,8),
+    new THREE.MeshStandardMaterial({color:0x8a8578, roughness:0.7}));
+  pole.position.y=2; pole.castShadow=true;
+  g.add(pole);
+  // each component sits on the mounting plate as its own distinct part, not one blob
+  addPart(g, new THREE.BoxGeometry(1.7,0.06,0.9), 0x322f27, [0,4.0,0]);              // mounting plate
+  addPart(g, new THREE.BoxGeometry(0.55,0.05,0.38), 0x1f6b3a, [-0.5,4.06,-0.12]);    // ESP32
+  addPart(g, new THREE.BoxGeometry(0.13,0.05,0.13), 0x2255aa, [-0.05,4.06,0.22]);    // MPU6050
+  addPart(g, new THREE.BoxGeometry(0.13,0.05,0.13), 0x1a8a8a, [0.15,4.06,0.22]);     // ADXL345
+  addPart(g, new THREE.BoxGeometry(0.16,0.3,0.14), 0x3f6fae, [0.42,4.2,0.08]);       // DHT22
+  addPart(g, new THREE.CylinderGeometry(0.025,0.025,0.55,6), 0x9a958a, [-0.15,4.1,0.3], Math.PI/2); // linear potentiometer
+  addPart(g, new THREE.BoxGeometry(0.08,0.05,0.05), 0x7a7568, [-0.1,4.1,0.3]);       // pot slider
+  addPart(g, new THREE.CylinderGeometry(0.09,0.09,0.35,8), 0x2a3f6a, [0.65,4.15,-0.25]); // Li-ion + TP4056
+  var antenna = addPart(g, new THREE.CylinderGeometry(0.014,0.02,0.7,6), 0x1c1a17, [0.72,4.5,0.18]);
+  antenna.rotation.z = 0.25;
+  var lamp = new THREE.Mesh(new THREE.SphereGeometry(0.16,10,10),
+    new THREE.MeshStandardMaterial({color:riskColor, emissive:riskColor, emissiveIntensity:1.4}));
+  lamp.position.set(-0.7,4.55,0);
+  g.add(lamp);
+  var lbl = makeLabel(label,'#e9e2ce'); lbl.position.y=5.6;
+  g.add(lbl);
+  g.userData.lamp = lamp;
+  g.userData.baseColor = riskColor;
+  scene.add(g);
+  return g;
+}
+
+var n1 = buildNode(-26,  6, 0x8a9a5b, 'SENSOR NODE 01');
+var n2 = buildNode(  0, 22, 0xe0a458, 'SENSOR NODE 02');
+var n3 = buildNode( 26,  6, 0xc1543a, 'SENSOR NODE 03');
+var n4 = buildNode(  0,-18, 0x8a9a5b, 'SENSOR NODE 04');
+var gw  = buildNode(  0,-34, 0xd8c9a0, 'RASPBERRY PI GATEWAY');
+gw.scale.set(1.3,1.5,1.3);
+var dish = new THREE.Mesh(new THREE.ConeGeometry(0.5,0.9,10),
+  new THREE.MeshStandardMaterial({color:0xbcae8c, roughness:0.5}));
+dish.position.set(0, h(0,-34)+5.3, -34);
+dish.rotation.x = Math.PI;
+scene.add(dish);
+
+// small floating status readout above every node -- "Node 0X / Tilt / Vibration / Displacement / Status"
+function makeStatusSprite(){
+  var cv=document.createElement('canvas'); cv.width=220; cv.height=110;
+  var tex=new THREE.CanvasTexture(cv);
+  var spr=new THREE.Sprite(new THREE.SpriteMaterial({map:tex, transparent:true, depthTest:false}));
+  spr.scale.set(4.4,2.2,1);
+  spr.userData.ctx=cv.getContext('2d'); spr.userData.tex=tex;
+  return spr;
+}
+function drawStatus(spr,label,tilt,vib,disp,status){
+  var ctx=spr.userData.ctx;
+  ctx.clearRect(0,0,220,110);
+  ctx.fillStyle='rgba(20,18,14,0.85)'; ctx.fillRect(0,0,220,110);
+  ctx.strokeStyle='#3a362c'; ctx.strokeRect(0,0,220,110);
+  ctx.fillStyle='#e9e2ce'; ctx.font='bold 15px monospace'; ctx.fillText(label,8,18);
+  ctx.font='13px monospace';
+  ctx.fillText('Tilt: '+tilt+'°',8,38);
+  ctx.fillText('Vibration: '+vib,8,56);
+  ctx.fillText('Displacement: '+disp+' mm',8,74);
+  ctx.fillStyle = status==='CRITICAL' ? '#c1543a' : status==='WATCH' ? '#e0a458' : status==='OFFLINE' ? '#7a7568' : '#8a9a5b';
+  ctx.font='bold 14px monospace'; ctx.fillText('Status: '+status,8,96);
+  spr.userData.tex.needsUpdate=true;
+}
+
+// LoRa mesh: every node talks to the gateway directly, AND to its neighbours --
+// so if one node drops out, its data still reaches the gateway via a peer hop
+var nodes=[n1,n2,n3,n4];
+var statusSprites = nodes.map(function(nd){ var s=makeStatusSprite(); s.position.set(0,6.6,0); nd.add(s); return s; });
+var gwLinks=[], packets=[];
+nodes.forEach(function(nd,ni){
+  var a = nd.position.clone(); a.y+=4.3;
+  var b = gw.position.clone(); b.y+=5.6;
+  var curve = new THREE.CatmullRomCurve3([a, a.clone().lerp(b,0.5).setY(Math.max(a.y,b.y)+3), b]);
+  var lineGeo = new THREE.BufferGeometry().setFromPoints(curve.getPoints(24));
+  var mat = new THREE.LineDashedMaterial({color:0x7a6a4d, dashSize:0.6, gapSize:0.4, transparent:true, opacity:0.6});
+  var line = new THREE.Line(lineGeo, mat);
+  line.computeLineDistances();
+  scene.add(line);
+  var pkt = new THREE.Mesh(new THREE.SphereGeometry(0.14,8,8), new THREE.MeshBasicMaterial({color:0xf0d9a8}));
+  scene.add(pkt);
+  gwLinks.push({node:ni, mat:mat});
+  packets.push({curve:curve, mesh:pkt, offset:Math.random(), ni:ni});
+});
+var meshPairs=[[0,1],[1,2],[2,3],[3,0]];
+var meshLinks=[];
+meshPairs.forEach(function(p){
+  var a=nodes[p[0]].position.clone(); a.y+=4.3;
+  var b=nodes[p[1]].position.clone(); b.y+=4.3;
+  var curve=new THREE.CatmullRomCurve3([a, a.clone().lerp(b,0.5).setY(Math.max(a.y,b.y)+1.2), b]);
+  var lineGeo=new THREE.BufferGeometry().setFromPoints(curve.getPoints(20));
+  var mat=new THREE.LineDashedMaterial({color:0x6a8aa0, dashSize:0.5, gapSize:0.5, transparent:true, opacity:0.16});
+  var line=new THREE.Line(lineGeo, mat);
+  line.computeLineDistances();
+  scene.add(line);
+  var pkt=new THREE.Mesh(new THREE.SphereGeometry(0.11,8,8), new THREE.MeshBasicMaterial({color:0x9fc6e0, transparent:true, opacity:0}));
+  scene.add(pkt);
+  meshLinks.push({a:p[0], b:p[1], curve:curve, mat:mat, pkt:pkt});
+});
+var downIndex=-1, autoFailover=true, failCycle=1, crackBoost=0, vibBoost=0;
+(function toggleFailover(){
+  var delay = downIndex===-1 ? 4200 : 7000;
+  setTimeout(function(){
+    if(autoFailover) downIndex = downIndex===-1 ? Math.floor(Math.random()*4) : -1;
+    toggleFailover();
+  }, delay);
+})();
+
+// field terminal -- an on-site screen mirroring the readings, right in the 3D world
+var screenCanvas=document.createElement('canvas'); screenCanvas.width=256; screenCanvas.height=160;
+var screenCtx=screenCanvas.getContext('2d');
+var screenTex=new THREE.CanvasTexture(screenCanvas);
+var screenMesh=new THREE.Mesh(new THREE.PlaneGeometry(2.6,1.6), new THREE.MeshBasicMaterial({map:screenTex}));
+var screenGroup=new THREE.Group();
+var screenPost=new THREE.Mesh(new THREE.CylinderGeometry(0.08,0.1,3,8), new THREE.MeshStandardMaterial({color:0x8a8578}));
+screenPost.position.y=1.5; screenGroup.add(screenPost);
+screenMesh.position.set(0,3.1,0.05); screenGroup.add(screenMesh);
+screenGroup.position.set(9, h(9,-14), -14);
+screenGroup.rotation.y=-0.5;
+scene.add(screenGroup);
+function drawScreen(tilt,disp,vib,risk){
+  screenCtx.fillStyle = risk==='CRITICAL' ? '#3a1210' : '#0e1a12';
+  screenCtx.fillRect(0,0,256,160);
+  screenCtx.fillStyle = risk==='CRITICAL' ? '#e08a70' : '#9fe0a0';
+  screenCtx.font='bold 20px monospace'; screenCtx.fillText('ATOMX FIELD UNIT',10,26);
+  screenCtx.font='16px monospace';
+  screenCtx.fillText('TILT   '+tilt+'°',10,58);
+  screenCtx.fillText('DISP   '+disp+'mm',10,84);
+  screenCtx.fillText('VIB    '+vib+'g',10,110);
+  screenCtx.font='bold 22px monospace'; screenCtx.fillText(risk,10,144);
+  screenTex.needsUpdate=true;
+}
+drawScreen('0.0','0.0','0.00','NORMAL');
+
+// ground props: haul-truck-like blocks for scale & context (no branding, simple forms)
+function prop(x,z,w,h_,d,color){
+  var m=new THREE.Mesh(new THREE.BoxGeometry(w,h_,d), new THREE.MeshStandardMaterial({color:color, roughness:0.8}));
+  m.position.set(x, h(x,z)+h_/2, z); m.castShadow=true; m.receiveShadow=true;
+  scene.add(m);
+}
+prop(-46, -30, 3.2,1.6,5.5,0xb08a3a);
+prop(-42, -34, 3.2,1.6,5.5,0xb08a3a);
+prop( 40, 24, 2.2,1.1,2.2,0x5a5548);
+
+// active mining machinery -- the cause of the subsidence the sensors are tracking
+var truck=new THREE.Group();
+var truckBody=new THREE.Mesh(new THREE.BoxGeometry(3.4,1.5,1.8), new THREE.MeshStandardMaterial({color:0xd2a33a, roughness:0.6}));
+truckBody.position.y=1.1; truckBody.castShadow=true; truck.add(truckBody);
+var cab=new THREE.Mesh(new THREE.BoxGeometry(1.1,1.0,1.6), new THREE.MeshStandardMaterial({color:0x2c2a24}));
+cab.position.set(1.4,1.9,0); truck.add(cab);
+[[-1.2,-0.9],[-1.2,0.9],[1.2,-0.9],[1.2,0.9]].forEach(function(w){
+  var wheel=new THREE.Mesh(new THREE.CylinderGeometry(0.55,0.55,0.4,12), new THREE.MeshStandardMaterial({color:0x1c1a17}));
+  wheel.rotation.z=Math.PI/2; wheel.position.set(w[0],0.55,w[1]); truck.add(wheel);
+});
+scene.add(truck);
+
+var excav=new THREE.Group();
+var eBase=new THREE.Mesh(new THREE.CylinderGeometry(1.0,1.1,0.8,8), new THREE.MeshStandardMaterial({color:0xc1543a}));
+eBase.position.y=0.4; excav.add(eBase);
+var eCab=new THREE.Mesh(new THREE.BoxGeometry(1.6,0.9,1.6), new THREE.MeshStandardMaterial({color:0xd2a33a}));
+eCab.position.y=1.1; excav.add(eCab);
+var arm1=new THREE.Mesh(new THREE.BoxGeometry(2.2,0.28,0.3), new THREE.MeshStandardMaterial({color:0x8a8578}));
+arm1.geometry.translate(1.1,0,0); arm1.position.set(0.8,1.5,0); excav.add(arm1);
+var arm2=new THREE.Mesh(new THREE.BoxGeometry(1.6,0.22,0.26), new THREE.MeshStandardMaterial({color:0x8a8578}));
+arm2.geometry.translate(0.8,0,0); arm2.position.set(2.2,0,0); arm1.add(arm2);
+excav.position.set(bowlX-9, 0, bowlZ+14);
+scene.add(excav);
+
+// ---- custom orbit controls (no OrbitControls in r128 build) ----
+var target = new THREE.Vector3(0,-1,-4);
+var radius=70, theta=0.7, phi=1.05;
+var dragging=false, lastX=0,lastY=0, autoSpin=true, interacted=false;
+function applyCam(){
+  camera.position.set(
+    target.x + radius*Math.sin(phi)*Math.sin(theta),
+    target.y + radius*Math.cos(phi),
+    target.z + radius*Math.sin(phi)*Math.cos(theta)
+  );
+  camera.lookAt(target);
+}
+applyCam();
+var dom = renderer.domElement;
+function down(x,y){dragging=true; lastX=x; lastY=y; autoSpin=false; interacted=true;}
+function move(x,y){
+  if(!dragging) return;
+  theta -= (x-lastX)*0.008;
+  phi   = THREE.MathUtils.clamp(phi - (y-lastY)*0.008, 0.06, 3.08);
+  lastX=x; lastY=y;
+}
+function up(){dragging=false;}
+dom.addEventListener('mousedown', function(e){down(e.clientX,e.clientY);});
+window.addEventListener('mousemove', function(e){move(e.clientX,e.clientY);});
+window.addEventListener('mouseup', up);
+dom.addEventListener('touchstart', function(e){var t=e.touches[0]; down(t.clientX,t.clientY);}, {passive:true});
+dom.addEventListener('touchmove', function(e){var t=e.touches[0]; move(t.clientX,t.clientY);}, {passive:true});
+dom.addEventListener('touchend', up);
+dom.addEventListener('wheel', function(e){
+  radius = THREE.MathUtils.clamp(radius + e.deltaY*0.05, 20, 140);
+  autoSpin=false; interacted=true;
+}, {passive:true});
+
+window.addEventListener('resize', function(){
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+document.querySelectorAll('#controls button[data-a]').forEach(function(b){
+  b.addEventListener('click', function(){
+    var a=b.getAttribute('data-a');
+    if(a==='deform'){ BOWL_DEPTH=Math.min(9.5,BOWL_DEPTH+1.5); rebuildTerrain(); }
+    else if(a==='crack'){ crackBoost=3; clearTimeout(window._cb); window._cb=setTimeout(function(){crackBoost=0;},6000); }
+    else if(a==='vib'){ vibBoost=0.16; clearTimeout(window._vb); window._vb=setTimeout(function(){vibBoost=0;},6000); }
+    else if(a==='fail'){ autoFailover=false; downIndex=failCycle; failCycle=(failCycle+1)%4; }
+    else if(a==='restore'){ downIndex=-1; autoFailover=true; }
+    else if(a==='reset'){ BOWL_DEPTH=5.0; rebuildTerrain(); downIndex=-1; autoFailover=true; crackBoost=0; vibBoost=0; }
+  });
+});
+document.querySelectorAll('#controls button[data-v]').forEach(function(b){
+  b.addEventListener('click', function(){
+    var v=b.getAttribute('data-v');
+    autoSpin=false; interacted=true;
+    if(v==='top'){ phi=0.18; theta=0.7; radius=100; target.set(0,-2,-6); }
+    else if(v==='side'){ phi=1.4; theta=1.57; radius=85; target.set(0,-2,-6); }
+    else if(v==='full'){ phi=1.05; theta=0.7; radius=75; target.set(0,-1,-4); }
+    else if(v==='underground'){ phi=1.2; theta=0.55; radius=42; target.set(bowlX,-14,bowlZ); }
+  });
+});
+
+// ---- telemetry ticker (single orchestrated live-data moment) ----
+var elTilt=document.getElementById('t-tilt'), elDisp=document.getElementById('t-disp'),
+    elVib=document.getElementById('t-vib'), elRisk=document.getElementById('t-risk'), elMesh=document.getElementById('t-mesh'),
+    elActive=document.getElementById('t-active');
+var lastDownIndex=-2;
+setInterval(function(){
+  var depthFrac = (BOWL_DEPTH-5.0)/4.5;
+  var tilt=(0.4+depthFrac*1.8+Math.random()*0.6).toFixed(1);
+  var disp=(1+depthFrac*8+crackBoost*10+Math.random()*2).toFixed(1);
+  var vib=(0.02+vibBoost+Math.random()*0.09).toFixed(2);
+  elTilt.textContent=tilt+'°'; elDisp.textContent=disp+'mm'; elVib.textContent=vib+'g';
+  var risk = (tilt>1.8||crackBoost>0) ? 'CRITICAL' : (tilt>1.1||vibBoost>0) ? 'WATCH' : 'NORMAL';
+  elRisk.textContent = risk;
+  elRisk.style.color = risk==='CRITICAL' ? '#c1543a' : risk==='WATCH' ? '#e0a458' : '#8a9a5b';
+  elActive.textContent = (downIndex===-1?4:3)+'/4';
+  drawScreen(tilt,disp,vib,risk);
+  nodes.forEach(function(nd,i){
+    var down = i===downIndex;
+    var s = down ? 'OFFLINE' : risk;
+    var jt=(parseFloat(tilt)+i*0.15).toFixed(1), jv=(parseFloat(vib)+i*0.01).toFixed(2), jd=(parseFloat(disp)+i*0.6).toFixed(1);
+    drawStatus(statusSprites[i], 'NODE 0'+(i+1), down?'--':jt, down?'--':jv, down?'--':jd, s);
+  });
+}, 1600);
+
+// ---- render loop ----
+var clock = new THREE.Clock();
+function animate(){
+  requestAnimationFrame(animate);
+  var dt = clock.getDelta();
+  var t = clock.elapsedTime;
+
+  [n1,n2,n3,n4,gw].forEach(function(nd,idx){
+    var isDown = idx===downIndex;
+    var pulse = 1.1 + Math.sin(t*2.4 + idx*1.7)*0.5;
+    nd.userData.lamp.material.color.set(isDown ? 0x4a463d : nd.userData.baseColor);
+    nd.userData.lamp.material.emissiveIntensity = isDown ? 0.15 : 1.1 + pulse*0.5;
+  });
+  gwLinks.forEach(function(l){ l.mat.opacity = (l.node===downIndex) ? 0.04 : 0.6; });
+  packets.forEach(function(p){
+    var down = p.ni===downIndex;
+    p.mesh.visible = !down;
+    if(!down) p.mesh.position.copy(p.curve.getPointAt((t*0.15+p.offset)%1));
+  });
+  meshLinks.forEach(function(ml){
+    var reroute = ml.a===downIndex || ml.b===downIndex;
+    ml.mat.opacity = reroute ? 0.55 : 0.16;
+    ml.pkt.material.opacity = reroute ? 0.95 : 0;
+    if(reroute) ml.pkt.position.copy(ml.curve.getPointAt((t*0.4)%1));
+  });
+  if(downIndex!==lastDownIndex){
+    lastDownIndex = downIndex;
+    elMesh.textContent = downIndex===-1 ? 'ALL NODES ONLINE' : ('NODE '+(downIndex+1)+' OFFLINE — REROUTING VIA MESH');
+    elMesh.style.color = downIndex===-1 ? '#8a9a5b' : '#e0a458';
+  }
+
+  var tp=(t*0.06)%1*Math.PI*2;
+  var tx=45+Math.cos(tp)*13, tz=25+Math.sin(tp)*13;
+  truck.position.set(tx, h(tx,tz), tz);
+  truck.rotation.y = -tp - Math.PI/2;
+  arm1.rotation.z = -0.15 + Math.sin(t*0.7)*0.18;
+  arm2.rotation.z = 0.3 + Math.sin(t*0.7+0.6)*0.22;
+  excav.position.y = h(excav.position.x, excav.position.z);
+
+  if(!dragging && !interacted){
+    if(autoSpin) theta += dt*0.05;
+  }
+  applyCam();
+  renderer.render(scene, camera);
+}
+animate();
+})();
+</script>
+</body>
+</html>
